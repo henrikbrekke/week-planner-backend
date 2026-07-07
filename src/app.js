@@ -7,6 +7,7 @@ const cors = require('cors');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 const { OAuth2Client } = require('google-auth-library');
 
 const DEFAULT_DATA = { users: [], images: [], plans: [] };
@@ -18,8 +19,18 @@ function createApp(overrides = {}) {
   const config = resolveConfig(overrides);
   const store = createStore(config.storageDir);
   ensureDirectory(config.uploadDir);
-  const apiRateLimiter = createRateLimiter({ windowMs: 60 * 1000, maxRequests: 120 });
-  const authRateLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests: 20 });
+  const apiRateLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+  const authRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
 
   const upload = multer({
     storage: multer.diskStorage({
@@ -49,7 +60,7 @@ function createApp(overrides = {}) {
     res.json({ ok: true });
   });
 
-  app.post('/api/auth/register', authRateLimiter, async (req, res, next) => {
+  app.post('/api/auth/register', apiRateLimiter, authRateLimiter, async (req, res, next) => {
     try {
       const { name, email, password } = req.body || {};
       if (!name || !email || !password) {
@@ -82,7 +93,7 @@ function createApp(overrides = {}) {
     }
   });
 
-  app.post('/api/auth/login', authRateLimiter, async (req, res, next) => {
+  app.post('/api/auth/login', apiRateLimiter, authRateLimiter, async (req, res, next) => {
     try {
       const { email, password } = req.body || {};
       if (!email || !password) {
@@ -105,7 +116,7 @@ function createApp(overrides = {}) {
     }
   });
 
-  app.post('/api/auth/google', authRateLimiter, async (req, res, next) => {
+  app.post('/api/auth/google', apiRateLimiter, authRateLimiter, async (req, res, next) => {
     try {
       const { credential } = req.body || {};
       if (!credential) {
@@ -155,7 +166,7 @@ function createApp(overrides = {}) {
     }
   });
 
-  app.post('/api/auth/logout', requireAuth(store, config), (req, res) => {
+  app.post('/api/auth/logout', apiRateLimiter, requireAuth(store, config), (req, res) => {
     const data = store.read();
     const user = data.users.find((candidate) => candidate.id === req.user.id);
     if (user) {
@@ -165,11 +176,11 @@ function createApp(overrides = {}) {
     res.status(200).json({ success: true });
   });
 
-  app.get('/api/auth/me', requireAuth(store, config), (req, res) => {
+  app.get('/api/auth/me', apiRateLimiter, requireAuth(store, config), (req, res) => {
     res.json(toPublicUser(req.user));
   });
 
-  app.get('/api/images', requireAuth(store, config), (req, res) => {
+  app.get('/api/images', apiRateLimiter, requireAuth(store, config), (req, res) => {
     const requestedTags = String(req.query.tags || '')
       .split(',')
       .map((tag) => tag.trim())
@@ -184,14 +195,14 @@ function createApp(overrides = {}) {
     res.json(images);
   });
 
-  app.post('/api/images', requireAuth(store, config), upload.single('image'), (req, res, next) => {
+  app.post('/api/images', apiRateLimiter, requireAuth(store, config), upload.single('image'), (req, res, next) => {
     try {
       if (!req.file) {
         return res.status(400).json({ error: 'image is required' });
       }
       const name = String(req.body?.name || '').trim();
       if (!name) {
-        void safeUnlink(req.file.path);
+        void safeDeleteUpload(config.uploadDir, req.file.filename);
         return res.status(400).json({ error: 'name is required' });
       }
 
@@ -214,7 +225,7 @@ function createApp(overrides = {}) {
     }
   });
 
-  app.patch('/api/images/:id', requireAuth(store, config), (req, res) => {
+  app.patch('/api/images/:id', apiRateLimiter, requireAuth(store, config), (req, res) => {
     const data = store.read();
     const image = data.images.find((candidate) => candidate.id === req.params.id && candidate.userId === req.user.id);
     if (!image) {
@@ -237,7 +248,7 @@ function createApp(overrides = {}) {
     res.json(toPublicImage(req, image));
   });
 
-  app.delete('/api/images/:id', requireAuth(store, config), async (req, res, next) => {
+  app.delete('/api/images/:id', apiRateLimiter, requireAuth(store, config), async (req, res, next) => {
     try {
       const data = store.read();
       const index = data.images.findIndex((candidate) => candidate.id === req.params.id && candidate.userId === req.user.id);
@@ -248,7 +259,7 @@ function createApp(overrides = {}) {
       const [removedImage] = data.images.splice(index, 1);
       data.plans = data.plans.filter((slot) => slot.imageId !== removedImage.id || slot.userId !== req.user.id);
       store.write(data);
-      await safeUnlink(resolveUploadPath(config.uploadDir, removedImage.filename));
+      await safeDeleteUpload(config.uploadDir, removedImage.filename);
 
       res.status(200).json({ success: true });
     } catch (error) {
@@ -256,7 +267,7 @@ function createApp(overrides = {}) {
     }
   });
 
-  app.get('/api/plans', requireAuth(store, config), (req, res) => {
+  app.get('/api/plans', apiRateLimiter, requireAuth(store, config), (req, res) => {
     const weekStart = validateWeekStart(req.query.weekStart || getCurrentWeekStart());
     if (!weekStart) {
       return res.status(400).json({ error: 'weekStart must be YYYY-MM-DD' });
@@ -271,7 +282,7 @@ function createApp(overrides = {}) {
     res.json({ weekStart, slots });
   });
 
-  app.put('/api/plans/slot', requireAuth(store, config), (req, res) => {
+  app.put('/api/plans/slot', apiRateLimiter, requireAuth(store, config), (req, res) => {
     const weekStart = validateWeekStart(req.body?.weekStart);
     const dayIndex = Number(req.body?.dayIndex);
     const slotIndex = Number(req.body?.slotIndex);
@@ -317,7 +328,7 @@ function createApp(overrides = {}) {
     res.status(201).json(toPublicSlot(req, slot, data.images));
   });
 
-  app.delete('/api/plans/slot/:id', requireAuth(store, config), (req, res) => {
+  app.delete('/api/plans/slot/:id', apiRateLimiter, requireAuth(store, config), (req, res) => {
     const data = store.read();
     const index = data.plans.findIndex((candidate) => candidate.id === req.params.id && candidate.userId === req.user.id);
     if (index === -1) {
@@ -335,9 +346,6 @@ function createApp(overrides = {}) {
     }
     if (error && process.env.NODE_ENV !== 'production') {
       console.error(error);
-    }
-    if (error) {
-      return res.status(500).json({ error: 'Internal server error' });
     }
     return res.status(500).json({ error: 'Internal server error' });
   });
@@ -500,28 +508,6 @@ function ensureDirectory(directoryPath) {
   fs.mkdirSync(directoryPath, { recursive: true });
 }
 
-function createRateLimiter({ windowMs, maxRequests }) {
-  const hits = new Map();
-
-  return (req, res, next) => {
-    const now = Date.now();
-    const key = String(req.headers['x-forwarded-for'] || req.ip || 'unknown');
-    const current = hits.get(key);
-
-    if (!current || current.resetAt <= now) {
-      hits.set(key, { count: 1, resetAt: now + windowMs });
-      return next();
-    }
-
-    if (current.count >= maxRequests) {
-      return res.status(429).json({ error: 'Too many requests' });
-    }
-
-    current.count += 1;
-    next();
-  };
-}
-
 function resolveUploadPath(uploadDir, filename) {
   const safeName = path.basename(String(filename || ''));
   const resolvedPath = path.resolve(uploadDir, safeName);
@@ -534,9 +520,9 @@ function resolveUploadPath(uploadDir, filename) {
   return resolvedPath;
 }
 
-async function safeUnlink(filePath) {
+async function safeDeleteUpload(uploadDir, filename) {
   try {
-    await fsp.unlink(filePath);
+    await fsp.unlink(resolveUploadPath(uploadDir, filename));
   } catch (error) {
     if (error.code !== 'ENOENT') {
       throw error;

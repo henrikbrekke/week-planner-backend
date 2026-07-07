@@ -144,6 +144,21 @@ test('upload images and manage weekly plan slots', async () => {
     });
 
     assert.equal(deleted.response.status, 200);
+
+    const removedImage = await jsonRequest(server.baseUrl, `/api/images/${upload.payload.id}`, {
+      method: 'DELETE',
+      token,
+    });
+
+    assert.equal(removedImage.response.status, 200);
+
+    const remainingImages = await jsonRequest(server.baseUrl, '/api/images', {
+      method: 'GET',
+      token,
+    });
+
+    assert.equal(remainingImages.response.status, 200);
+    assert.equal(remainingImages.payload.length, 0);
   } finally {
     await server.close();
   }
