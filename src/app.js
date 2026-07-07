@@ -18,6 +18,8 @@ function createApp(overrides = {}) {
   const config = resolveConfig(overrides);
   const store = createStore(config.storageDir);
   ensureDirectory(config.uploadDir);
+  const apiRateLimiter = createRateLimiter({ windowMs: 60 * 1000, maxRequests: 120 });
+  const authRateLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, maxRequests: 20 });
 
   const upload = multer({
     storage: multer.diskStorage({
@@ -40,13 +42,14 @@ function createApp(overrides = {}) {
   const app = express();
   app.use(cors());
   app.use(express.json({ limit: '1mb' }));
+  app.use('/api', apiRateLimiter);
   app.use('/uploads', express.static(config.uploadDir));
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true });
   });
 
-  app.post('/api/auth/register', async (req, res, next) => {
+  app.post('/api/auth/register', authRateLimiter, async (req, res, next) => {
     try {
       const { name, email, password } = req.body || {};
       if (!name || !email || !password) {
@@ -79,7 +82,7 @@ function createApp(overrides = {}) {
     }
   });
 
-  app.post('/api/auth/login', async (req, res, next) => {
+  app.post('/api/auth/login', authRateLimiter, async (req, res, next) => {
     try {
       const { email, password } = req.body || {};
       if (!email || !password) {
@@ -102,7 +105,7 @@ function createApp(overrides = {}) {
     }
   });
 
-  app.post('/api/auth/google', async (req, res, next) => {
+  app.post('/api/auth/google', authRateLimiter, async (req, res, next) => {
     try {
       const { credential } = req.body || {};
       if (!credential) {
@@ -147,11 +150,8 @@ function createApp(overrides = {}) {
       store.write(data);
 
       res.json({ user: toPublicUser(user), tokens });
-    } catch (error) {
-      if (error.message?.includes('Wrong recipient') || error.message?.includes('Token used too late') || error.message?.includes('Invalid token signature')) {
-        return res.status(401).json({ error: 'Invalid Google credential' });
-      }
-      next(error);
+    } catch (_error) {
+      return res.status(401).json({ error: 'Invalid Google credential' });
     }
   });
 
@@ -248,7 +248,7 @@ function createApp(overrides = {}) {
       const [removedImage] = data.images.splice(index, 1);
       data.plans = data.plans.filter((slot) => slot.imageId !== removedImage.id || slot.userId !== req.user.id);
       store.write(data);
-      await safeUnlink(path.join(config.uploadDir, removedImage.filename));
+      await safeUnlink(resolveUploadPath(config.uploadDir, removedImage.filename));
 
       res.status(200).json({ success: true });
     } catch (error) {
@@ -332,6 +332,9 @@ function createApp(overrides = {}) {
   app.use((error, _req, res, _next) => {
     if (error instanceof multer.MulterError) {
       return res.status(400).json({ error: error.message });
+    }
+    if (error && process.env.NODE_ENV !== 'production') {
+      console.error(error);
     }
     if (error) {
       return res.status(500).json({ error: 'Internal server error' });
@@ -495,6 +498,40 @@ function requiredSecretFallback(name, isProduction) {
 
 function ensureDirectory(directoryPath) {
   fs.mkdirSync(directoryPath, { recursive: true });
+}
+
+function createRateLimiter({ windowMs, maxRequests }) {
+  const hits = new Map();
+
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = String(req.headers['x-forwarded-for'] || req.ip || 'unknown');
+    const current = hits.get(key);
+
+    if (!current || current.resetAt <= now) {
+      hits.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+
+    if (current.count >= maxRequests) {
+      return res.status(429).json({ error: 'Too many requests' });
+    }
+
+    current.count += 1;
+    next();
+  };
+}
+
+function resolveUploadPath(uploadDir, filename) {
+  const safeName = path.basename(String(filename || ''));
+  const resolvedPath = path.resolve(uploadDir, safeName);
+  const uploadRoot = `${path.resolve(uploadDir)}${path.sep}`;
+
+  if (!safeName || safeName !== filename || !resolvedPath.startsWith(uploadRoot)) {
+    throw new Error('Invalid upload path');
+  }
+
+  return resolvedPath;
 }
 
 async function safeUnlink(filePath) {
