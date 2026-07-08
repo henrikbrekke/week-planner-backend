@@ -91,7 +91,7 @@ Tests use Testcontainers to spin up a real PostgreSQL container — Docker must 
 
 ## API
 
-All endpoints are under `/api`. Protected routes require `Authorization: ******
+All endpoints are under `/api`. Protected routes require an `Authorization: Bearer <token>` header.
 
 | Method | Path                    | Auth | Description                        |
 |--------|-------------------------|------|------------------------------------|
