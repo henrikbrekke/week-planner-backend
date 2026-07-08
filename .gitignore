@@ -1,0 +1,19 @@
+node_modules/
+storage/
+.env
+
+# Gradle
+.gradle/
+build/
+out/
+*.class
+*.jar
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# macOS
+.DS_Store
